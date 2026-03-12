@@ -1,0 +1,9 @@
+PyQt6>=6.6
+sounddevice>=0.4
+numpy>=1.24
+onnxruntime>=1.17
+librosa>=0.10
+torch>=2.0
+silero-vad>=5.0
+pyperclip>=1.8
+pyautogui>=0.9
