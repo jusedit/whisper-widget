@@ -85,13 +85,6 @@ class AudioRecorder:
                 return np.array([], dtype=self.DTYPE)
             return np.concatenate(remaining)
 
-    def get_all_audio(self) -> np.ndarray:
-        """Get all recorded audio (for fallback)."""
-        with self._lock:
-            if not self._chunks:
-                return np.array([], dtype=self.DTYPE)
-            return np.concatenate(self._chunks)
-
     def is_recording(self) -> bool:
         return self._recording
 
@@ -135,6 +128,8 @@ class AudioRecorder:
             if segment:
                 audio = np.concatenate(segment)
                 self._chunk_callback(audio)
-            self._chunk_start_idx = end_idx
+            # Free emitted chunks to prevent unbounded memory growth
+            del self._chunks[:end_idx]
+            self._chunk_start_idx = 0
             self._had_speech = False
             self._silence_blocks = 0

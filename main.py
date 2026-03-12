@@ -136,8 +136,14 @@ class HotkeyListener(threading.Thread):
         self._running = False
 
 
+_tray_icon_cache: dict[str, QIcon] = {}
+
+
 def _generate_tray_icon(state: str = "ready") -> QIcon:
-    """Generate a tray icon programmatically."""
+    """Generate a tray icon programmatically (cached per state)."""
+    cached = _tray_icon_cache.get(state)
+    if cached is not None:
+        return cached
     size = 64
     pixmap = QPixmap(size, size)
     pixmap.fill(QColor(0, 0, 0, 0))
@@ -180,7 +186,9 @@ def _generate_tray_icon(state: str = "ready") -> QIcon:
         p.drawEllipse(46, 4, 14, 14)
 
     p.end()
-    return QIcon(pixmap)
+    icon = QIcon(pixmap)
+    _tray_icon_cache[state] = icon
+    return icon
 
 
 class VoiceWidget:
@@ -265,10 +273,9 @@ class VoiceWidget:
 
         self._model_dir = model_dir
 
-        # Level forwarding timer
+        # Level forwarding timer (started/stopped with recording)
         self._level_timer = QTimer()
         self._level_timer.timeout.connect(self._forward_level)
-        self._level_timer.start(16)
 
         # System tray
         with PerfTimer("app.finish_init.tray"):
@@ -338,20 +345,17 @@ class VoiceWidget:
             # Model quality changed — download if needed + reload
             if self._config.model_quality != old_quality:
                 self._switch_model(self._config.model_quality)
-        else:
-            self._resume_hotkey()
 
     def _pause_hotkey(self):
         """Temporarily unregister hotkey (e.g. during shortcut capture)."""
-        hk = getattr(self, '_hotkey', None)
-        if hk:
-            hk.stop()
-            hk.join(timeout=1)
+        if self._hotkey:
+            self._hotkey.stop()
+            self._hotkey.join(timeout=1)
             self._hotkey = None
 
     def _resume_hotkey(self):
         """Re-register hotkey if not already running."""
-        if getattr(self, '_hotkey', None) is None:
+        if self._hotkey is None:
             self._hotkey = HotkeyListener(
                 self._signals.hotkey_pressed.emit,
                 self._config.hotkey_modifiers,
@@ -360,7 +364,7 @@ class VoiceWidget:
             self._hotkey.start()
 
     def _restart_hotkey(self):
-        if hasattr(self, '_hotkey') and self._hotkey:
+        if self._hotkey:
             self._hotkey.stop()
             self._hotkey.join(timeout=1)
         self._hotkey = HotkeyListener(
@@ -487,6 +491,7 @@ class VoiceWidget:
         self._partial_texts.clear()
         self._chunk_audios: list[np.ndarray] = []
         self._pending_chunks = 0
+        self._level_timer.start(16)
         self._total_chunked_audio = 0.0
         self._record_start_time = time.time()
         self.recorder.start()
@@ -505,7 +510,8 @@ class VoiceWidget:
         with self._partial_lock:
             chunk_idx = len(self._partial_texts)
             self._partial_texts.append("")
-            self._chunk_audios.append(audio.copy())
+            if self._debug:
+                self._chunk_audios.append(audio.copy())
             self._pending_chunks += 1
 
         def do_chunk_transcribe():
@@ -527,6 +533,7 @@ class VoiceWidget:
 
     def _stop_recording(self):
         self._recording = False
+        self._level_timer.stop()
         remainder = self.recorder.stop()
         total_recording = time.time() - self._record_start_time
 
@@ -641,8 +648,7 @@ class VoiceWidget:
 
     def _paste_text(self, text: str):
         pyperclip.copy(text)
-        time.sleep(0.05)
-        pyautogui.hotkey('ctrl', 'v')
+        QTimer.singleShot(50, lambda: pyautogui.hotkey('ctrl', 'v'))
 
     def run(self):
         # Defer all heavy init to after event loop starts —

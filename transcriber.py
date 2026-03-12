@@ -14,9 +14,8 @@ from perf_logger import PerfTimer
 
 log = logging.getLogger("whisper")
 
-# Default model paths (local or AppData)
+# Default model path (local dev/portable mode)
 DEFAULT_MODEL_DIR = Path(__file__).parent / "models" / "parakeet-tdt-v3"
-APPDATA_MODEL_DIR = Path(os.environ.get("APPDATA", "")) / "WhisperWidget" / "models" / "parakeet-tdt-v3"
 
 # Audio preprocessing constants matching NeMo's AudioToMelSpectrogramPreprocessor
 SAMPLE_RATE = 16000

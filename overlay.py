@@ -1,6 +1,7 @@
 """Apple Dynamic Island-style floating overlay using PyQt6."""
 
 import math
+from collections import deque
 from PyQt6.QtCore import (
     Qt, QTimer, QPropertyAnimation, QEasingCurve, QRectF, pyqtProperty,
 )
@@ -39,9 +40,8 @@ class NotchOverlay(QWidget):
         super().__init__()
         self._state = self.HIDDEN
         self._level = 0.0
-        self._wave_history: list[float] = [0.0] * 48
+        self._wave_history: deque[float] = deque([0.0] * 48, maxlen=48)
         self._anim_phase = 0.0
-        self._transcribe_dots = 0
 
         # Animated properties
         self._pill_w = 0.0
@@ -64,10 +64,6 @@ class NotchOverlay(QWidget):
         # Render timer (~60fps)
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._tick)
-
-        # Dot animation
-        self._dot_timer = QTimer(self)
-        self._dot_timer.timeout.connect(self._tick_dots)
 
         # Property animations
         self._w_anim = QPropertyAnimation(self, b"pill_w")
@@ -131,7 +127,6 @@ class NotchOverlay(QWidget):
         self._state = self.LOADING
         self._anim_phase = 0.0
         self._timer.start(16)
-        self._dot_timer.stop()
         self.show()
         self._reposition()
         self._animate_to(self.LOAD_W, self.LOAD_H, 1.0, 500)
@@ -147,24 +142,20 @@ class NotchOverlay(QWidget):
 
     def show_recording(self):
         self._state = self.RECORDING
-        self._wave_history = [0.0] * 48
+        self._wave_history = deque([0.0] * 48, maxlen=48)
         self._timer.start(16)  # ~60fps
-        self._dot_timer.stop()
         self.show()
         self._reposition()
         self._animate_to(self.REC_W, self.REC_H, 1.0, 350)
 
     def show_transcribing(self):
         self._state = self.TRANSCRIBING
-        self._transcribe_dots = 0
         self._anim_phase = 0.0
         self._timer.start(16)
-        self._dot_timer.start(400)
         self._animate_to(self.TRANS_W, self.TRANS_H, 1.0, 300)
 
     def show_success(self):
         self._state = self.SUCCESS
-        self._dot_timer.stop()
         self._anim_phase = 0.0
         self._animate_to(self.SUCCESS_W, self.SUCCESS_H, 1.0, 200)
         QTimer.singleShot(600, self._fade_out)
@@ -176,7 +167,6 @@ class NotchOverlay(QWidget):
     def hide_overlay(self):
         self._state = self.HIDDEN
         self._timer.stop()
-        self._dot_timer.stop()
         self._pill_w = 0
         self._pill_h = 0
         self._pill_opacity = 0
@@ -185,15 +175,10 @@ class NotchOverlay(QWidget):
     def set_level(self, level: float):
         self._level = level
         self._wave_history.append(level)
-        if len(self._wave_history) > 48:
-            self._wave_history.pop(0)
 
     def _tick(self):
         self._anim_phase += 0.08
         self.update()
-
-    def _tick_dots(self):
-        self._transcribe_dots = (self._transcribe_dots + 1) % 4
 
     # --- Painting ---
 

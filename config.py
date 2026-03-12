@@ -129,20 +129,7 @@ class Config:
         self.save()
 
     def hotkey_display_name(self) -> str:
-        parts = []
-        m = self._data["hotkey_modifiers"]
-        if m & 0x0002:
-            parts.append("Ctrl")
-        if m & 0x0001:
-            parts.append("Alt")
-        if m & 0x0004:
-            parts.append("Shift")
-        if m & 0x0008:
-            parts.append("Win")
-        vk = self._data["hotkey_vk"]
-        key_name = VK_NAMES.get(vk, f"0x{vk:02X}")
-        parts.append(key_name)
-        return " + ".join(parts)
+        return format_hotkey_name(self._data["hotkey_modifiers"], self._data["hotkey_vk"])
 
 
 VK_NAMES = {
@@ -151,3 +138,18 @@ VK_NAMES = {
     **{0x41 + i: chr(0x41 + i) for i in range(26)},
     **{0x30 + i: str(i) for i in range(10)},
 }
+
+
+def format_hotkey_name(modifiers: int, vk: int) -> str:
+    """Format modifier bitmask + VK code as a display string like 'Ctrl + Space'."""
+    parts = []
+    if modifiers & 0x0002:
+        parts.append("Ctrl")
+    if modifiers & 0x0001:
+        parts.append("Alt")
+    if modifiers & 0x0004:
+        parts.append("Shift")
+    if modifiers & 0x0008:
+        parts.append("Win")
+    parts.append(VK_NAMES.get(vk, f"0x{vk:02X}"))
+    return " + ".join(parts)

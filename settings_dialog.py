@@ -7,7 +7,7 @@ from PyQt6.QtWidgets import (
     QPushButton, QLineEdit, QFrame, QComboBox,
 )
 
-from config import Config, VK_NAMES
+from config import Config, format_hotkey_name
 
 # Windows VK code mappings
 QT_KEY_TO_VK = {
@@ -134,21 +134,6 @@ QComboBox QAbstractItemView {
 """
 
 
-def _hotkey_name(modifiers: int, vk: int) -> str:
-    """Format hotkey as display string without touching Config."""
-    parts = []
-    if modifiers & 0x0002:
-        parts.append("Ctrl")
-    if modifiers & 0x0001:
-        parts.append("Alt")
-    if modifiers & 0x0004:
-        parts.append("Shift")
-    if modifiers & 0x0008:
-        parts.append("Win")
-    parts.append(VK_NAMES.get(vk, f"0x{vk:02X}"))
-    return " + ".join(parts)
-
-
 class HotkeyEdit(QLineEdit):
     """Line edit that captures key combinations."""
 
@@ -166,7 +151,7 @@ class HotkeyEdit(QLineEdit):
     def set_hotkey(self, modifiers: int, vk: int):
         self._modifiers = modifiers
         self._vk = vk
-        self.setText(_hotkey_name(modifiers, vk))
+        self.setText(format_hotkey_name(modifiers, vk))
 
     def get_hotkey(self) -> tuple[int, int]:
         return self._modifiers, self._vk
@@ -185,7 +170,7 @@ class HotkeyEdit(QLineEdit):
         self.setProperty("capturing", False)
         self.style().unpolish(self)
         self.style().polish(self)
-        self.setText(_hotkey_name(self._modifiers, self._vk))
+        self.setText(format_hotkey_name(self._modifiers, self._vk))
         self.capture_ended.emit()
 
     def mousePressEvent(self, event):
@@ -417,11 +402,18 @@ class SettingsDialog(QDialog):
             self._on_resume_hotkey()
 
     def _save(self):
+        # Batch all changes into one save (not 5 separate writes)
         mods, vk = self._hotkey_edit.get_hotkey()
-        self._config.set_hotkey(mods, vk)
-        self._config.autostart = self._autostart_cb.isChecked()
-        self._config.debug_mode = self._debug_cb.isChecked()
-        self._config.model_quality = self._quality_combo.currentData()
+        self._config._data["hotkey_modifiers"] = mods
+        self._config._data["hotkey_vk"] = vk
+
+        new_autostart = self._autostart_cb.isChecked()
+        if new_autostart != self._config._data.get("autostart", False):
+            self._config._set_autostart_registry(new_autostart)
+        self._config._data["autostart"] = new_autostart
+
+        self._config._data["debug_mode"] = self._debug_cb.isChecked()
+        self._config._data["model_quality"] = self._quality_combo.currentData()
         self._config.save()
         self.accept()
 
@@ -431,8 +423,3 @@ class SettingsDialog(QDialog):
             self._on_resume_hotkey()
         super().reject()
 
-    @property
-    def hotkey_changed(self) -> bool:
-        mods, vk = self._hotkey_edit.get_hotkey()
-        return (mods != self._config.hotkey_modifiers
-                or vk != self._config.hotkey_vk)

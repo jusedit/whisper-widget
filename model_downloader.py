@@ -53,7 +53,6 @@ def models_exist(model_dir: Path, quality: str | None = None) -> bool:
 
 class _DownloadSignals(QObject):
     progress = pyqtSignal(str, float)  # filename, overall fraction 0.0-1.0
-    file_done = pyqtSignal(str)
     error = pyqtSignal(str)
     all_done = pyqtSignal()
 
@@ -142,7 +141,6 @@ class DownloadDialog(QDialog):
 
     def _connect_signals(self):
         self._signals.progress.connect(self._on_progress)
-        self._signals.file_done.connect(self._on_file_done)
         self._signals.error.connect(self._on_error)
         self._signals.all_done.connect(self._on_all_done)
 
@@ -170,7 +168,6 @@ class DownloadDialog(QDialog):
             # Skip if already downloaded
             if dest.exists() and dest.stat().st_size >= expected_size * 0.9:
                 bytes_done += expected_size
-                self._signals.file_done.emit(filename)
                 continue
 
             url = f"{BASE_URL}/{filename}"
@@ -202,7 +199,6 @@ class DownloadDialog(QDialog):
                     dest.unlink()
                 part.rename(dest)
                 bytes_done += file_bytes
-                self._signals.file_done.emit(filename)
 
             except Exception as e:
                 self._signals.error.emit(f"Failed to download {filename}: {e}")
@@ -220,9 +216,6 @@ class DownloadDialog(QDialog):
         self._status.setText(
             f"Downloading {short_name}... {done_mb:.0f} / {total_mb:.0f} MB ({pct:.0f}%)"
         )
-
-    def _on_file_done(self, filename: str):
-        pass
 
     def _on_error(self, error: str):
         self._status.setText(error)

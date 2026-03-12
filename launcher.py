@@ -359,17 +359,6 @@ def _launch_app():
         log.error("pythonw.exe not found — cannot launch")
         return
 
-    # Verify critical imports work before launching
-    if not _verify_imports():
-        log.error("Cannot launch — import verification failed")
-        _show_error(
-            "Whisper Widget failed to start.\n\n"
-            f"Check log: {LOG_FILE}\n\n"
-            "Try deleting the python folder and re-running:\n"
-            f"{PYTHON_DIR}"
-        )
-        return
-
     presplash = APP_DIR / "presplash.pyw"
     if presplash.exists():
         log.info("Starting presplash")
@@ -544,16 +533,21 @@ def main():
     _create_desktop_shortcut()
 
     # Setup: extract Python + install deps (with UI if needed)
-    if _needs_setup() or _needs_deps() or _deps_changed():
+    need_setup = _needs_setup()
+    need_deps = _needs_deps()
+    deps_changed = _deps_changed()
+    ran_setup = False
+    if need_setup or need_deps or deps_changed:
         log.info("Setup needed (python=%s, deps=%s, deps_changed=%s)",
-                 _needs_setup(), _needs_deps(), _deps_changed())
+                 need_setup, need_deps, deps_changed)
         if not _setup_with_ui():
             log.error("Setup failed — not launching app")
             return
+        ran_setup = True
 
-    # Verify imports work — re-run setup if broken (pip skips what's installed)
+    # Verify imports work — only when setup ran or files were updated
     t0 = time.time()
-    if not _verify_imports():
+    if ran_setup and not _verify_imports():
         log.warning("Import verification failed — re-running setup to repair")
         if not _setup_with_ui():
             log.error("Repair failed — not launching app")
