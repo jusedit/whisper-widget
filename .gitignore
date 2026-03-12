@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+venv/
+.venv/
+
+# Build
+build/
+dist/
+*.spec
+python-embed.zip
+get-pip.py
+
+# App runtime (auto-generated)
+debug/
+assets/*.wav
+models/
+.pid
+.splash_ready
+.launcher_path
+.requirements_hash
+
+# Audio files
+*.wav
+*.mp3
+
+# Test data
+thorsten-de/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
