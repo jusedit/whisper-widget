@@ -22,7 +22,7 @@ Uses [Parakeet TDT v3](https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onn
 
 - Windows 10/11
 - Python 3.11+ (for development mode)
-- ~4 GB disk space (model + dependencies)
+- ~1.5 GB disk space (model + dependencies)
 - Microphone
 
 ## Quick Start
@@ -107,8 +107,8 @@ Hotkey pressed again
 
 1. **Recording** — `sounddevice` captures 16kHz mono audio in 1024-sample blocks
 2. **Chunking** — silence detection (RMS < 0.005 for 1.5s) splits long recordings at natural pauses
-3. **VAD Trimming** — Silero VAD v5 trims leading/trailing silence, keeping internal pauses intact
-4. **Preprocessing** — 128-bin log-mel spectrogram via vectorized NumPy STFT
+3. **VAD Trimming** — Silero VAD (ONNX, no torch) trims leading/trailing silence, keeping internal pauses intact
+4. **Preprocessing** — 128-bin log-mel spectrogram via pure NumPy STFT (no librosa/torch)
 5. **Encoder** — ONNX Runtime runs the Parakeet encoder on CPU
 6. **Decoder** — TDT greedy decode with duration prediction
 7. **Output** — SentencePiece token IDs decoded to text, artifacts cleaned
@@ -118,21 +118,21 @@ Hotkey pressed again
 The app logs detailed timing data with `PERF` prefix for analysis:
 
 ```
-PERF app.imports: 120ms              # torch, onnxruntime, PyQt6
-PERF model.encoder_session: 8500ms   # ONNX session creation
-PERF model.decoder_session: 2100ms
+PERF app.imports: 50ms               # numpy, onnxruntime, PyQt6 (no torch)
+PERF model.encoder_session: 2000ms   # ONNX session creation (INT8)
+PERF model.decoder_session: 400ms
 PERF model.warmup: 350ms             # eliminates first-inference penalty
-PERF model.total: 11200ms
-PERF app.startup_total: 12500ms      # process start to ready
+PERF model.total: 3100ms
+PERF app.startup_total: 4500ms       # process start to ready
 PERF transcribe.vad_trim: 45ms       # per-inference breakdown
 PERF transcribe.mel: 30ms
 PERF transcribe.encoder: 280ms
 PERF transcribe.decoder: 250ms
 PERF transcribe.total: 620ms (audio=4.5s RTF=0.138)
-PERF memory [after_model_load]: rss=450MB peak=520MB
+PERF memory [after_model_load]: rss=735MB peak=753MB
 ```
 
-Typical real-time factor (RTF) is 0.1–0.2 on a modern CPU (5–10x faster than real-time).
+Typical real-time factor (RTF) is 0.1–0.2 on a modern CPU (5–10x faster than real-time). Memory usage is ~800 MB at runtime (INT8 model, no torch/librosa in process).
 
 ## Project Structure
 
@@ -140,6 +140,7 @@ Typical real-time factor (RTF) is 0.1–0.2 on a modern CPU (5–10x faster than
 whisper-widget/
   main.py                 # App entry point, hotkey listener, recording flow
   transcriber.py          # Parakeet TDT v3 ONNX inference engine
+  vad.py                  # Silero VAD ONNX wrapper (pure numpy, no torch)
   recorder.py             # Mic recording with VAD-based chunking
   overlay.py              # Dynamic Island-style floating UI
   config.py               # Settings (JSON + Windows Registry)
@@ -179,7 +180,7 @@ This downloads an embedded Python 3.13 package, bundles it with the app source v
 
 On first launch, the exe:
 1. Extracts Python runtime to `%LOCALAPPDATA%\WhisperWidget\python\`
-2. Installs dependencies via pip (~1-2 min)
+2. Installs dependencies via pip (~30s, no torch/librosa needed)
 3. Launches the app
 
 Subsequent launches skip setup and start in seconds. Running a newer exe updates the installation automatically.
@@ -190,9 +191,9 @@ Subsequent launches skip setup and start in seconds. Running a newer exe updates
 |-----------|-----------|
 | Speech model | Parakeet TDT v3 (NVIDIA, ONNX) |
 | Inference | ONNX Runtime (CPU) |
-| VAD | Silero VAD v5 |
+| VAD | Silero VAD v5 (ONNX — no torch dependency) |
 | Audio capture | sounddevice (PortAudio) |
-| Preprocessing | NumPy vectorized STFT, 128-bin log-mel |
+| Preprocessing | Pure NumPy STFT + mel filterbank (no librosa/torch) |
 | UI framework | PyQt6 |
 | Paste mechanism | pyperclip + pyautogui |
 | Packaging | PyInstaller (single exe) |
