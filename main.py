@@ -8,6 +8,7 @@ import sys
 import os
 import re
 import logging
+import subprocess
 import threading
 import time
 import atexit
@@ -46,10 +47,9 @@ if sys.platform == "win32":
         if os.path.isdir(_capi_dir):
             os.add_dll_directory(_capi_dir)
 
-# torch + onnxruntime MUST be imported before PyQt6 (Windows DLL conflict)
+# onnxruntime MUST be imported before PyQt6 (Windows DLL conflict)
 _t_imports = time.perf_counter()
 import numpy as np
-import torch
 import onnxruntime
 import pyperclip
 import pyautogui
@@ -57,7 +57,7 @@ from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QObject, QSize
 from PyQt6.QtWidgets import QApplication, QSystemTrayIcon, QMenu
 from PyQt6.QtGui import QIcon, QAction, QPixmap, QPainter, QColor, QPen, QPainterPath, QFont
 
-from config import Config
+from config import Config, __version__
 from assets import ensure_assets, get_sound_path
 from model_downloader import models_exist, DownloadDialog
 from overlay import NotchOverlay
@@ -95,6 +95,7 @@ class TranscriptionSignals(QObject):
     hotkey_pressed = pyqtSignal()
     model_loaded = pyqtSignal()
     model_failed = pyqtSignal(str)
+    file_transcribed = pyqtSignal(str)
 
 
 class HotkeyListener(threading.Thread):
@@ -202,7 +203,7 @@ class VoiceWidget:
         self.app.setApplicationName("Whisper Widget")
 
         log.info("=" * 40)
-        log.info("Whisper Widget starting up (pid=%d)", os.getpid())
+        log.info("Whisper Widget v%s starting up (pid=%d)", __version__, os.getpid())
         _write_pid()
 
         # Minimal init — presplash.pyw handles the loading animation,
@@ -221,6 +222,8 @@ class VoiceWidget:
         self._record_start_time = 0.0
         self._total_chunked_audio = 0.0
         self._pending_level = 0.0
+        self._drop_mode = False
+        self._drop_timeout: QTimer | None = None
 
         # Signals (must exist before event loop processes anything)
         self._signals = TranscriptionSignals()
@@ -229,6 +232,12 @@ class VoiceWidget:
         self._signals.hotkey_pressed.connect(self.toggle_recording)
         self._signals.model_loaded.connect(self._on_model_loaded)
         self._signals.model_failed.connect(self._on_model_failed)
+        self._signals.file_transcribed.connect(self._on_file_transcription_done)
+
+        # Connect overlay file-drop signals
+        self.overlay.file_dropped.connect(self._on_file_dropped)
+        self.overlay.copy_clicked.connect(self._on_copy_clicked)
+        self.overlay.close_clicked.connect(self._on_close_drop)
 
         log.info("PERF app.init: %.0fms", (time.perf_counter() - _t0) * 1000)
 
@@ -300,7 +309,7 @@ class VoiceWidget:
     def _setup_tray(self):
         self.tray = QSystemTrayIcon(self.app)
         self.tray.setIcon(self._app_icon)
-        self.tray.setToolTip(f"Whisper Widget — {self._config.hotkey_display_name()} to record")
+        self.tray.setToolTip(f"Whisper Widget v{__version__} — {self._config.hotkey_display_name()} to record")
 
         menu = QMenu()
 
@@ -461,7 +470,18 @@ class VoiceWidget:
             pass
 
     def toggle_recording(self):
+        # If drop mode is active, hotkey closes it
+        if self._drop_mode:
+            self._exit_drop_mode()
+            return
+
         if self._recording:
+            # Double-tap detection: if recording < 400ms, enter file drop mode
+            elapsed = time.time() - self._record_start_time
+            if elapsed < 0.4:
+                self._cancel_recording()
+                self._enter_drop_mode()
+                return
             self._stop_recording()
         else:
             self._start_recording()
@@ -555,10 +575,13 @@ class VoiceWidget:
 
                 final_text = ""
                 if len(remainder) >= 1600:
-                    t0 = time.time()
-                    final_text = self._transcriber.transcribe(remainder, debug_prefix=debug_pfx)
-                    dur = time.time() - t0
-                    log.info(f"Final: {remainder_dur:.1f}s audio -> {dur:.2f}s inference: {final_text[:60]}")
+                    try:
+                        t0 = time.time()
+                        final_text = self._transcriber.transcribe(remainder, debug_prefix=debug_pfx)
+                        dur = time.time() - t0
+                        log.info(f"Final: {remainder_dur:.1f}s audio -> {dur:.2f}s inference: {final_text[:60]}")
+                    except Exception as e:
+                        log.error(f"Final chunk failed (recovering partials): {e}", exc_info=True)
 
                 # Wait for pending chunks
                 while True:
@@ -591,7 +614,16 @@ class VoiceWidget:
 
                 self._signals.finished.emit(full_text)
             except Exception as e:
-                self._signals.error.emit(str(e))
+                # Last resort: still try to emit any partial texts we have
+                with self._partial_lock:
+                    all_parts = list(self._partial_texts)
+                rescued = " ".join(p for p in all_parts
+                                   if p.strip() and re.sub(r'[.\s]+', '', p))
+                if rescued:
+                    log.error(f"Transcription error (rescued {len(all_parts)} chunks): {e}", exc_info=True)
+                    self._signals.finished.emit(rescued)
+                else:
+                    self._signals.error.emit(str(e))
 
         threading.Thread(target=do_final, daemon=True).start()
 
@@ -627,6 +659,130 @@ class VoiceWidget:
         except Exception as e:
             log.error(f"Debug: full re-transcription failed: {e}", exc_info=True)
 
+    # --- File drop transcription ---
+
+    def _cancel_recording(self):
+        """Cancel recording without transcribing (for double-tap to drop mode)."""
+        self._recording = False
+        self._level_timer.stop()
+        self.recorder.stop()  # discard audio
+
+    def _enter_drop_mode(self):
+        """Show file drop target overlay."""
+        self._drop_mode = True
+        self.overlay.show_drop_target()
+        self.tray.setIcon(_generate_tray_icon("processing"))
+        self._status_action.setText("Drop audio file...")
+        self._play_sound("stop.wav")
+
+        # Auto-close after 15 seconds
+        self._drop_timeout = QTimer()
+        self._drop_timeout.setSingleShot(True)
+        self._drop_timeout.timeout.connect(self._exit_drop_mode)
+        self._drop_timeout.start(15000)
+
+    def _exit_drop_mode(self):
+        """Close drop target overlay."""
+        if not self._drop_mode:
+            return
+        self._drop_mode = False
+        if self._drop_timeout:
+            self._drop_timeout.stop()
+            self._drop_timeout = None
+        self.overlay.hide_overlay()
+        self.tray.setIcon(self._app_icon)
+        self._status_action.setText("Ready")
+
+    def _on_file_dropped(self, path: str):
+        """Handle file dropped on overlay."""
+        if self._drop_timeout:
+            self._drop_timeout.stop()
+            self._drop_timeout = None
+
+        if self._transcriber is None:
+            self.tray.showMessage(
+                "Whisper Widget", "Model still loading...",
+                QSystemTrayIcon.MessageIcon.Warning, 1500,
+            )
+            return
+
+        filename = Path(path).name
+        log.info(f"File dropped for transcription: {path}")
+        self.overlay.show_file_transcribing()
+        self._status_action.setText(f"Transcribing {filename}...")
+
+        def do_transcribe():
+            try:
+                audio = self._load_audio_file(path)
+                if len(audio) < 1600:
+                    log.warning("File too short to transcribe: %s", path)
+                    self._signals.file_transcribed.emit("")
+                    return
+                audio_dur = len(audio) / 16000
+                log.info(f"File loaded: {audio_dur:.1f}s audio from {filename}")
+                text = self._transcriber.transcribe_chunked(audio)
+                log.info(f"File transcription done ({filename}): {text[:80]}")
+                self._signals.file_transcribed.emit(text)
+            except Exception as e:
+                log.error(f"File transcription error: {e}", exc_info=True)
+                self._signals.error.emit(f"File transcription failed: {e}")
+
+        threading.Thread(target=do_transcribe, daemon=True).start()
+
+    @staticmethod
+    def _load_audio_file(path: str) -> np.ndarray:
+        """Load any audio file as 16kHz mono float32 using ffmpeg."""
+        result = subprocess.run(
+            [
+                'ffmpeg', '-i', path,
+                '-vn',              # no video
+                '-ar', '16000',     # 16kHz
+                '-ac', '1',         # mono
+                '-f', 'f32le',      # raw float32 little-endian
+                '-loglevel', 'error',
+                '-',                # stdout
+            ],
+            capture_output=True,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"ffmpeg error: {result.stderr.decode().strip()}")
+        return np.frombuffer(result.stdout, dtype=np.float32)
+
+    def _on_file_transcription_done(self, text: str):
+        """Handle completed file transcription."""
+        if text.strip():
+            self.overlay.show_file_done(text)
+            self._status_action.setText("Transcription ready — click Copy")
+        else:
+            self._drop_mode = False
+            self.overlay.show_success()
+            self.tray.setIcon(self._app_icon)
+            self._status_action.setText("No speech detected")
+            QTimer.singleShot(2000, lambda: self._status_action.setText("Ready"))
+
+    def _on_copy_clicked(self):
+        """Copy file transcription to clipboard."""
+        text = self.overlay._result_text
+        if text:
+            pyperclip.copy(text)
+            log.info("File transcription copied to clipboard (%d chars)", len(text))
+            self.tray.showMessage(
+                "Whisper Widget", "Transcription copied to clipboard",
+                QSystemTrayIcon.MessageIcon.Information, 1500,
+            )
+        self._drop_mode = False
+        self.overlay.hide_overlay()
+        self.tray.setIcon(self._app_icon)
+        self._status_action.setText("Ready")
+
+    def _on_close_drop(self):
+        """Handle close click on file done overlay."""
+        self._drop_mode = False
+        self.overlay.hide_overlay()
+        self.tray.setIcon(self._app_icon)
+        self._status_action.setText("Ready")
+
     def _on_transcription_done(self, text: str):
         if text.strip():
             self.overlay.show_success()
@@ -637,6 +793,7 @@ class VoiceWidget:
         self._status_action.setText("Ready")
 
     def _on_transcription_error(self, error: str):
+        self._drop_mode = False
         self.overlay.hide_overlay()
         self.tray.setIcon(self._app_icon)
         self._status_action.setText("Ready")

@@ -7,7 +7,7 @@ from PyQt6.QtWidgets import (
     QPushButton, QLineEdit, QFrame, QComboBox,
 )
 
-from config import Config, format_hotkey_name
+from config import Config, format_hotkey_name, __version__
 
 # Windows VK code mappings
 QT_KEY_TO_VK = {
@@ -261,7 +261,7 @@ class SettingsDialog(QDialog):
         title.setStyleSheet("color: #ffffff;")
         layout.addWidget(title)
 
-        subtitle = QLabel("Voice-to-text with Parakeet TDT v3")
+        subtitle = QLabel(f"v{__version__} — Voice-to-text with Parakeet TDT v3")
         subtitle.setFont(QFont("Segoe UI", 9))
         subtitle.setStyleSheet("color: #636366;")
         layout.addWidget(subtitle)

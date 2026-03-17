@@ -25,7 +25,7 @@ class AudioRecorder:
     SILENCE_THRESHOLD = 0.005  # RMS below this = silence
     SILENCE_DURATION = 1.5     # seconds of clear silence to trigger chunk boundary
     MIN_CHUNK_SECS = 5.0       # don't emit chunks shorter than 5s
-    MAX_CHUNK_SECS = 60.0      # force split at any small pause after this duration
+    MAX_CHUNK_SECS = 30.0      # force split at any small pause after this duration
 
     def __init__(self):
         self._chunks: list[np.ndarray] = []

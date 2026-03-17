@@ -54,15 +54,17 @@ def log_memory(label: str = ""):
                 ("PagefileUsage", c_size_t), ("PeakPagefileUsage", c_size_t),
             ]
 
+        import os
+
         pmc = PMC()
         pmc.cb = sizeof(PMC)
-        if ctypes.windll.psapi.GetProcessMemoryInfo(
-            ctypes.windll.kernel32.GetCurrentProcess(), byref(pmc), pmc.cb
-        ):
+        h = ctypes.windll.kernel32.OpenProcess(0x0410, False, os.getpid())
+        if ctypes.windll.kernel32.K32GetProcessMemoryInfo(h, byref(pmc), pmc.cb):
             tag = f" [{label}]" if label else ""
             log.info(
                 "PERF memory%s: rss=%.0fMB peak=%.0fMB",
                 tag, pmc.WorkingSetSize / 1048576, pmc.PeakWorkingSetSize / 1048576,
             )
+        ctypes.windll.kernel32.CloseHandle(h)
     except Exception:
         pass

@@ -9,6 +9,7 @@ Uses [Parakeet TDT v3](https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onn
 - **Global hotkey** (default `Ctrl+Space`) — works from any app
 - **Fully offline** — no internet needed after model download
 - **Auto-paste** — transcription goes straight to your cursor
+- **File drop transcription** — double-tap hotkey, drop any audio/video file to transcribe offline (via ffmpeg)
 - **Dynamic Island UI** — macOS-inspired floating overlay with live waveform
 - **Chunked transcription** — long recordings are split at silence gaps and transcribed incrementally
 - **INT8 / FP32 models** — choose between speed (~670 MB) and quality (~2.5 GB)
@@ -59,9 +60,18 @@ Running a newer exe automatically updates the existing installation (kills the o
 |--------|-------------|
 | `Ctrl+Space` | Start recording — overlay shows live waveform |
 | `Ctrl+Space` again | Stop recording — transcription auto-pastes at cursor |
+| `Ctrl+Space` × 2 (quick) | **File drop mode** — drag an audio file onto the notch to transcribe it |
 | Right-click tray icon | Settings, quit |
 
 The microphone is **only active while recording**. No always-on listening.
+
+### File Transcription
+
+Double-tap `Ctrl+Space` quickly (within 400ms) to open a drop target in the notch overlay. Drag any audio or video file onto it — the file is converted via ffmpeg and transcribed locally. The result stays in the overlay with a Copy button (not auto-pasted).
+
+Supported formats: MP3, WAV, FLAC, M4A, AAC, OGG, OPUS, WMA, MP4, WebM, MKV, AVI, MOV.
+
+**Requires**: [ffmpeg](https://ffmpeg.org/) on your PATH.
 
 ### Changing the Hotkey
 

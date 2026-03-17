@@ -4,27 +4,46 @@ import math
 from collections import deque
 from PyQt6.QtCore import (
     Qt, QTimer, QPropertyAnimation, QEasingCurve, QRectF, pyqtProperty,
+    pyqtSignal,
 )
 from PyQt6.QtGui import (
     QPainter, QColor, QBrush, QPen, QRadialGradient, QLinearGradient,
-    QPainterPath, QFont,
+    QPainterPath, QFont, QCursor,
 )
 from PyQt6.QtWidgets import QWidget, QApplication
+
+# Supported audio/video extensions for file drop
+SUPPORTED_EXTENSIONS = {
+    '.mp3', '.wav', '.flac', '.m4a', '.aac', '.ogg', '.oga', '.opus',
+    '.wma', '.mp4', '.webm', '.mpeg', '.mpga', '.mkv', '.avi', '.mov',
+}
 
 
 class NotchOverlay(QWidget):
     """Floating Dynamic Island-style overlay at top-center of screen."""
+
+    # Signals for file drop interaction
+    file_dropped = pyqtSignal(str)
+    copy_clicked = pyqtSignal()
+    close_clicked = pyqtSignal()
 
     HIDDEN = 0
     RECORDING = 1
     TRANSCRIBING = 2
     SUCCESS = 3
     LOADING = 4
+    DROP_TARGET = 5
+    FILE_TRANSCRIBING = 6
+    FILE_DONE = 7
 
-    # Dimensions
+    # Standard widget dimensions
     MAX_W = 260
     MAX_H = 52
     MARGIN_TOP = 12
+
+    # Larger widget for interactive drop mode
+    DROP_AREA_W = 340
+    DROP_AREA_H = 80
 
     # Target pill sizes per state
     REC_W = 240
@@ -35,6 +54,12 @@ class NotchOverlay(QWidget):
     SUCCESS_H = 38
     LOAD_W = 200
     LOAD_H = 40
+    DROP_W = 280
+    DROP_H = 56
+    FILE_TRANS_W = 220
+    FILE_TRANS_H = 44
+    FILE_DONE_W = 200
+    FILE_DONE_H = 44
 
     def __init__(self):
         super().__init__()
@@ -42,6 +67,12 @@ class NotchOverlay(QWidget):
         self._level = 0.0
         self._wave_history: deque[float] = deque([0.0] * 48, maxlen=48)
         self._anim_phase = 0.0
+
+        # File drop state
+        self._drag_hovering = False
+        self._result_text = ""
+        self._copy_rect = QRectF()
+        self._close_rect = QRectF()
 
         # Animated properties
         self._pill_w = 0.0
@@ -77,9 +108,21 @@ class NotchOverlay(QWidget):
         screen = QApplication.primaryScreen()
         if screen:
             geom = screen.geometry()
-            x = geom.x() + (geom.width() - self.MAX_W) // 2
+            x = geom.x() + (geom.width() - self.width()) // 2
             y = geom.y() + self.MARGIN_TOP
             self.move(x, y)
+
+    # --- Interactive mode ---
+
+    def _set_interactive(self, interactive: bool):
+        """Toggle mouse/drag interaction for the overlay."""
+        self.setWindowFlag(Qt.WindowType.WindowTransparentForInput, not interactive)
+        self.setAcceptDrops(interactive)
+        if interactive:
+            self.setCursor(QCursor(Qt.CursorShape.ArrowCursor))
+        else:
+            self.unsetCursor()
+        self.show()
 
     # --- Animated properties ---
 
@@ -127,6 +170,7 @@ class NotchOverlay(QWidget):
         self._state = self.LOADING
         self._anim_phase = 0.0
         self._timer.start(16)
+        self.setFixedSize(self.MAX_W, self.MAX_H)
         self.show()
         self._reposition()
         self._animate_to(self.LOAD_W, self.LOAD_H, 1.0, 500)
@@ -144,6 +188,7 @@ class NotchOverlay(QWidget):
         self._state = self.RECORDING
         self._wave_history = deque([0.0] * 48, maxlen=48)
         self._timer.start(16)  # ~60fps
+        self.setFixedSize(self.MAX_W, self.MAX_H)
         self.show()
         self._reposition()
         self._animate_to(self.REC_W, self.REC_H, 1.0, 350)
@@ -160,6 +205,32 @@ class NotchOverlay(QWidget):
         self._animate_to(self.SUCCESS_W, self.SUCCESS_H, 1.0, 200)
         QTimer.singleShot(600, self._fade_out)
 
+    def show_drop_target(self):
+        """Show file drop zone overlay."""
+        self._state = self.DROP_TARGET
+        self._anim_phase = 0.0
+        self._drag_hovering = False
+        self._timer.start(16)
+        self.setFixedSize(self.DROP_AREA_W, self.DROP_AREA_H)
+        self._set_interactive(True)
+        self._reposition()
+        self._animate_to(self.DROP_W, self.DROP_H, 1.0, 350)
+
+    def show_file_transcribing(self):
+        """Show file transcription progress."""
+        self._state = self.FILE_TRANSCRIBING
+        self._anim_phase = 0.0
+        self._timer.start(16)
+        self._animate_to(self.FILE_TRANS_W, self.FILE_TRANS_H, 1.0, 300)
+
+    def show_file_done(self, text: str):
+        """Show file transcription result with copy/close buttons."""
+        self._state = self.FILE_DONE
+        self._result_text = text
+        self._anim_phase = 0.0
+        self._timer.start(16)
+        self._animate_to(self.FILE_DONE_W, self.FILE_DONE_H, 1.0, 250)
+
     def _fade_out(self):
         self._animate_to(0, 0, 0.0, 350)
         QTimer.singleShot(400, self.hide_overlay)
@@ -170,6 +241,11 @@ class NotchOverlay(QWidget):
         self._pill_w = 0
         self._pill_h = 0
         self._pill_opacity = 0
+        self._drag_hovering = False
+        self._result_text = ""
+        # Restore non-interactive standard size
+        self.setFixedSize(self.MAX_W, self.MAX_H)
+        self._set_interactive(False)
         self.hide()
 
     def set_level(self, level: float):
@@ -179,6 +255,54 @@ class NotchOverlay(QWidget):
     def _tick(self):
         self._anim_phase += 0.08
         self.update()
+
+    # --- Drag and drop ---
+
+    def dragEnterEvent(self, event):
+        if self._state != self.DROP_TARGET:
+            event.ignore()
+            return
+        mime = event.mimeData()
+        if mime.hasUrls():
+            urls = mime.urls()
+            if urls and urls[0].isLocalFile():
+                path = urls[0].toLocalFile()
+                ext = ('.' + path.rsplit('.', 1)[-1].lower()) if '.' in path else ''
+                if ext in SUPPORTED_EXTENSIONS:
+                    event.acceptProposedAction()
+                    self._drag_hovering = True
+                    self.update()
+                    return
+        event.ignore()
+
+    def dragMoveEvent(self, event):
+        if self._state == self.DROP_TARGET and self._drag_hovering:
+            event.acceptProposedAction()
+
+    def dragLeaveEvent(self, event):
+        self._drag_hovering = False
+        self.update()
+
+    def dropEvent(self, event):
+        self._drag_hovering = False
+        urls = event.mimeData().urls()
+        if urls and urls[0].isLocalFile():
+            path = urls[0].toLocalFile()
+            event.acceptProposedAction()
+            self.file_dropped.emit(path)
+        self.update()
+
+    def mousePressEvent(self, event):
+        if event.button() != Qt.MouseButton.LeftButton:
+            return
+        if self._state == self.FILE_DONE:
+            pos = event.position()
+            if self._copy_rect.contains(pos):
+                self.copy_clicked.emit()
+                return
+            if self._close_rect.contains(pos):
+                self.close_clicked.emit()
+                return
 
     # --- Painting ---
 
@@ -192,8 +316,8 @@ class NotchOverlay(QWidget):
 
         # Center the pill in the widget
         pw, ph = self._pill_w, self._pill_h
-        px = (self.MAX_W - pw) / 2
-        py = (self.MAX_H - ph) / 2
+        px = (self.width() - pw) / 2
+        py = (self.height() - ph) / 2
         radius = ph / 2
 
         pill_rect = QRectF(px, py, pw, ph)
@@ -213,6 +337,12 @@ class NotchOverlay(QWidget):
             self._paint_success(p, pill_rect, radius)
         elif self._state == self.LOADING:
             self._paint_loading(p, pill_rect, radius)
+        elif self._state == self.DROP_TARGET:
+            self._paint_drop_target(p, pill_rect, radius)
+        elif self._state == self.FILE_TRANSCRIBING:
+            self._paint_file_transcribing(p, pill_rect, radius)
+        elif self._state == self.FILE_DONE:
+            self._paint_file_done(p, pill_rect, radius)
 
         p.end()
 
@@ -477,3 +607,197 @@ class NotchOverlay(QWidget):
         p.setFont(font)
         text_rect = QRectF(arc_x + arc_r + 8, rect.y(), rect.right() - arc_x - arc_r - 24, rect.height())
         p.drawText(text_rect, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, "Loading model...")
+
+    def _paint_drop_target(self, p: QPainter, rect: QRectF, radius: float):
+        """Drop zone with audio file icon and instruction text."""
+        cx = rect.x() + rect.width() / 2
+        cy = rect.y() + rect.height() / 2
+
+        # Hover glow
+        if self._drag_hovering:
+            pulse = 0.5 + 0.5 * math.sin(self._anim_phase * 3)
+            glow_color = QColor(10, 132, 255, int(30 + 20 * pulse))
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QBrush(glow_color))
+            p.drawRoundedRect(rect, radius, radius)
+
+            border_pen = QPen(QColor(10, 132, 255, 120))
+            border_pen.setWidthF(1.5)
+            p.setPen(border_pen)
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawRoundedRect(
+                QRectF(rect.x() + 1, rect.y() + 1, rect.width() - 2, rect.height() - 2),
+                radius - 1, radius - 1,
+            )
+
+        # Shimmer
+        shimmer_phase = (self._anim_phase * 0.3) % 1.0
+        shimmer_x = rect.x() + shimmer_phase * rect.width()
+        shimmer = QLinearGradient(shimmer_x - 50, 0, shimmer_x + 50, 0)
+        shimmer.setColorAt(0, QColor(255, 255, 255, 0))
+        shimmer.setColorAt(0.5, QColor(255, 255, 255, 6))
+        shimmer.setColorAt(1, QColor(255, 255, 255, 0))
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QBrush(shimmer))
+        p.drawRoundedRect(rect, radius, radius)
+
+        # Audio file icon (left side)
+        icon_x = rect.x() + 30
+        icon_color = QColor(10, 132, 255, 200) if self._drag_hovering else QColor(140, 140, 150, 180)
+        icon_pen = QPen(icon_color)
+        icon_pen.setWidthF(1.5)
+        icon_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        icon_pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        p.setPen(icon_pen)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+
+        # File outline with folded corner
+        file_path = QPainterPath()
+        file_path.moveTo(icon_x - 7, cy - 10)
+        file_path.lineTo(icon_x + 3, cy - 10)
+        file_path.lineTo(icon_x + 7, cy - 6)
+        file_path.lineTo(icon_x + 7, cy + 10)
+        file_path.lineTo(icon_x - 7, cy + 10)
+        file_path.closeSubpath()
+        p.drawPath(file_path)
+
+        # Fold crease
+        p.drawLine(int(icon_x + 3), int(cy - 10), int(icon_x + 3), int(cy - 6))
+        p.drawLine(int(icon_x + 3), int(cy - 6), int(icon_x + 7), int(cy - 6))
+
+        # Music note inside file
+        p.drawLine(int(icon_x - 1), int(cy - 2), int(icon_x - 1), int(cy + 5))
+        p.setBrush(icon_color)
+        p.drawEllipse(QRectF(icon_x - 4, cy + 3, 5, 3.5))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+
+        # Text
+        text_color = QColor(10, 132, 255, 220) if self._drag_hovering else QColor(180, 180, 190, 200)
+        p.setPen(text_color)
+        font = QFont("Segoe UI", 9)
+        font.setWeight(QFont.Weight.Medium)
+        p.setFont(font)
+        text = "Drop to transcribe" if self._drag_hovering else "Drop audio file"
+        text_rect = QRectF(icon_x + 16, rect.y(), rect.right() - icon_x - 32, rect.height())
+        p.drawText(text_rect, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, text)
+
+    def _paint_file_transcribing(self, p: QPainter, rect: QRectF, radius: float):
+        """File transcription in progress — spinning arc + text."""
+        cx = rect.x() + rect.width() / 2
+        cy = rect.y() + rect.height() / 2
+
+        # Shimmer
+        shimmer_phase = (self._anim_phase * 0.4) % 1.0
+        shimmer_x = rect.x() + shimmer_phase * rect.width()
+        shimmer = QLinearGradient(shimmer_x - 40, 0, shimmer_x + 40, 0)
+        shimmer.setColorAt(0, QColor(255, 255, 255, 0))
+        shimmer.setColorAt(0.5, QColor(255, 255, 255, 8))
+        shimmer.setColorAt(1, QColor(255, 255, 255, 0))
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QBrush(shimmer))
+        p.drawRoundedRect(rect, radius, radius)
+
+        # Spinning arc on left
+        arc_x = rect.x() + 22
+        arc_r = 7.0
+        arc_rect = QRectF(arc_x - arc_r, cy - arc_r, arc_r * 2, arc_r * 2)
+        start_angle = int(self._anim_phase * 200) % 5760
+        span = 2400
+
+        glow = QRadialGradient(arc_x, cy, arc_r * 2.5)
+        glow.setColorAt(0, QColor(99, 132, 255, 30))
+        glow.setColorAt(1, QColor(99, 132, 255, 0))
+        p.setBrush(QBrush(glow))
+        p.drawEllipse(QRectF(arc_x - arc_r * 2.5, cy - arc_r * 2.5,
+                             arc_r * 5, arc_r * 5))
+
+        arc_pen = QPen(QColor(99, 132, 255, 200))
+        arc_pen.setWidthF(2.0)
+        arc_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        p.setPen(arc_pen)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawArc(arc_rect, start_angle, span)
+
+        track_pen = QPen(QColor(99, 132, 255, 30))
+        track_pen.setWidthF(2.0)
+        p.setPen(track_pen)
+        p.drawEllipse(arc_rect)
+
+        # "Transcribing..." text
+        fade = min(1.0, self._anim_phase * 0.5)
+        p.setPen(QColor(200, 200, 210, int(180 * fade)))
+        font = QFont("Segoe UI", 9)
+        font.setWeight(QFont.Weight.Medium)
+        p.setFont(font)
+        text_rect = QRectF(arc_x + arc_r + 8, rect.y(),
+                           rect.right() - arc_x - arc_r - 24, rect.height())
+        p.drawText(text_rect, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+                   "Transcribing...")
+
+    def _paint_file_done(self, p: QPainter, rect: QRectF, radius: float):
+        """Result with checkmark, Copy button, and Close button."""
+        cx = rect.x() + rect.width() / 2
+        cy = rect.y() + rect.height() / 2
+
+        # Brief green flash at start
+        if self._anim_phase < 2:
+            flash = max(0, math.sin(self._anim_phase * 4))
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QColor(52, 199, 89, int(40 * flash)))
+            p.drawRoundedRect(rect, radius, radius)
+
+        # Checkmark on the left
+        check_x = rect.x() + 26
+        check_pen = QPen(QColor(52, 199, 89, 220))
+        check_pen.setWidthF(2.2)
+        check_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        check_pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        p.setPen(check_pen)
+        check = QPainterPath()
+        check.moveTo(check_x - 5, cy)
+        check.lineTo(check_x - 1, cy + 4)
+        check.lineTo(check_x + 6, cy - 4)
+        p.drawPath(check)
+
+        # "Copy" button (center area)
+        copy_w = 58
+        copy_h = 24
+        copy_x = cx - copy_w / 2 + 4
+        copy_y = cy - copy_h / 2
+        self._copy_rect = QRectF(copy_x, copy_y, copy_w, copy_h)
+
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(255, 255, 255, 15))
+        p.drawRoundedRect(self._copy_rect, copy_h / 2, copy_h / 2)
+
+        # Copy icon (two overlapping rects)
+        ci_x = copy_x + 14
+        copy_pen = QPen(QColor(200, 200, 210, 200))
+        copy_pen.setWidthF(1.2)
+        p.setPen(copy_pen)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawRoundedRect(QRectF(ci_x - 5, cy - 2.5, 7, 8), 1.5, 1.5)
+        p.drawRoundedRect(QRectF(ci_x - 2, cy - 5.5, 7, 8), 1.5, 1.5)
+
+        # "Copy" text
+        p.setPen(QColor(200, 200, 210, 200))
+        font = QFont("Segoe UI", 8)
+        font.setWeight(QFont.Weight.Medium)
+        p.setFont(font)
+        p.drawText(
+            QRectF(ci_x + 8, copy_y, copy_w - 24, copy_h),
+            Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, "Copy",
+        )
+
+        # Close × button on the right
+        close_x = rect.right() - 22
+        close_r = 12
+        self._close_rect = QRectF(close_x - close_r, cy - close_r, close_r * 2, close_r * 2)
+
+        close_pen = QPen(QColor(150, 150, 160, 180))
+        close_pen.setWidthF(1.5)
+        close_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        p.setPen(close_pen)
+        s = 4
+        p.drawLine(int(close_x - s), int(cy - s), int(close_x + s), int(cy + s))
+        p.drawLine(int(close_x - s), int(cy + s), int(close_x + s), int(cy - s))

@@ -36,9 +36,11 @@ if not exist "get-pip.py" (
 
 echo.
 
-REM --- Install PyInstaller ---
-echo Installing PyInstaller...
-venv\Scripts\pip install pyinstaller --quiet 2>nul
+REM --- Ensure PyInstaller is installed ---
+if not exist "venv\Scripts\pyinstaller.exe" (
+    echo Installing PyInstaller...
+    venv\Scripts\pip install pyinstaller --quiet
+)
 
 echo Building WhisperWidget.exe...
 venv\Scripts\pyinstaller launcher.py ^
@@ -52,6 +54,7 @@ venv\Scripts\pyinstaller launcher.py ^
     --add-data "config.py;." ^
     --add-data "recorder.py;." ^
     --add-data "transcriber.py;." ^
+    --add-data "vad.py;." ^
     --add-data "settings_dialog.py;." ^
     --add-data "model_downloader.py;." ^
     --add-data "assets.py;." ^
@@ -60,7 +63,7 @@ venv\Scripts\pyinstaller launcher.py ^
     --add-data "favicon.ico;." ^
     --add-data "python-embed.zip;." ^
     --add-data "get-pip.py;." ^
-    --clean
+    --clean -y
 
 echo.
 if exist dist\WhisperWidget.exe (

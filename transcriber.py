@@ -5,11 +5,9 @@ import re
 import time
 import logging
 import numpy as np
-import librosa
-import torch
 import onnxruntime as ort
 from pathlib import Path
-from silero_vad import load_silero_vad, get_speech_timestamps
+from vad import load_silero_vad_onnx, get_speech_timestamps
 from perf_logger import PerfTimer
 
 log = logging.getLogger("whisper")
@@ -36,12 +34,63 @@ _MEL_FB = None
 _WINDOW = None
 
 
+def _hz_to_mel(hz):
+    """Convert Hz to Mel scale (Slaney/O'Shaughnessy, matches librosa default)."""
+    hz = np.asarray(hz, dtype=np.float64)
+    with np.errstate(divide="ignore"):
+        mel = np.where(
+            hz < 1000.0,
+            3.0 * hz / 200.0,
+            15.0 + 27.0 * np.log(np.maximum(hz, 1e-10) / 1000.0) / np.log(6.4),
+        )
+    return mel
+
+
+def _mel_to_hz(mel):
+    """Convert Mel scale to Hz (Slaney/O'Shaughnessy)."""
+    mel = np.asarray(mel, dtype=np.float64)
+    hz = np.where(
+        mel < 15.0,
+        200.0 * mel / 3.0,
+        1000.0 * np.exp((mel - 15.0) * np.log(6.4) / 27.0),
+    )
+    return hz
+
+
+def _mel_filterbank(sr, n_fft, n_mels):
+    """Compute mel filterbank matrix (matches librosa.filters.mel with Slaney norm)."""
+    fmin, fmax = 0.0, sr / 2.0
+    mel_min = _hz_to_mel(fmin)
+    mel_max = _hz_to_mel(fmax)
+
+    # n_mels + 2 linearly spaced points in mel scale
+    mels = np.linspace(float(mel_min), float(mel_max), n_mels + 2)
+    hz = _mel_to_hz(mels)
+
+    # FFT bin frequencies
+    fft_freqs = np.fft.rfftfreq(n_fft, 1.0 / sr)
+
+    # Create triangular filters (vectorized)
+    fdiff = np.diff(hz)
+    ramps = hz[:, np.newaxis] - fft_freqs[np.newaxis, :]
+
+    weights = np.zeros((n_mels, len(fft_freqs)), dtype=np.float64)
+    for i in range(n_mels):
+        lower = -ramps[i] / fdiff[i]
+        upper = ramps[i + 2] / fdiff[i + 1]
+        weights[i] = np.maximum(0, np.minimum(lower, upper))
+
+    # Slaney normalization
+    enorm = 2.0 / (hz[2 : n_mels + 2] - hz[:n_mels])
+    weights *= enorm[:, np.newaxis]
+
+    return weights.astype(np.float32)
+
+
 def _init_mel():
     global _MEL_FB, _WINDOW
     if _MEL_FB is None:
-        _MEL_FB = librosa.filters.mel(
-            sr=SAMPLE_RATE, n_fft=N_FFT, n_mels=N_MELS,
-        ).astype(np.float32)
+        _MEL_FB = _mel_filterbank(SAMPLE_RATE, N_FFT, N_MELS)
         # Symmetric Hann window matching parakeet-rs, zero-padded to N_FFT
         win = np.hanning(WIN_LENGTH).astype(np.float32)
         _WINDOW = np.zeros(N_FFT, dtype=np.float32)
@@ -72,7 +121,7 @@ def compute_mel_spectrogram(audio: np.ndarray) -> np.ndarray:
     # Apply window and FFT
     frames *= _WINDOW
     spectrum = np.fft.rfft(frames, n=N_FFT)
-    power = np.real(spectrum * np.conj(spectrum))  # faster than abs()**2
+    power = np.abs(spectrum) ** 2
 
     # Mel filterbank + log
     mel = power @ _MEL_FB.T  # (time, n_mels)
@@ -90,14 +139,14 @@ def compute_mel_spectrogram(audio: np.ndarray) -> np.ndarray:
 class ParakeetTranscriber:
     """Offline Parakeet TDT v3 transcriber using ONNX Runtime."""
 
-    def __init__(self, model_dir: str | Path | None = None):
+    def __init__(self, model_dir: str | Path | None = None, quality: str | None = None):
         model_dir = Path(model_dir or DEFAULT_MODEL_DIR)
 
         with PerfTimer("model.vocab"):
             self._vocab = self._load_vocab(model_dir / "vocab.txt")
 
         with PerfTimer("model.vad"):
-            self._vad = load_silero_vad()
+            self._vad = load_silero_vad_onnx()
 
         opts = ort.SessionOptions()
         opts.inter_op_num_threads = 2
@@ -106,10 +155,18 @@ class ParakeetTranscriber:
 
         providers = ['CPUExecutionProvider']
 
-        # Prefer FP32 model, fall back to INT8 if only that exists
-        encoder_name = "encoder-model.onnx"
-        decoder_name = "decoder_joint-model.onnx"
-        if not (model_dir / encoder_name).exists():
+        # Use configured quality, fall back to whatever exists
+        if quality is None:
+            from config import Config
+            quality = Config().model_quality
+
+        if quality == "int8" and (model_dir / "encoder-model.int8.onnx").exists():
+            encoder_name = "encoder-model.int8.onnx"
+            decoder_name = "decoder_joint-model.int8.onnx"
+        elif (model_dir / "encoder-model.onnx").exists():
+            encoder_name = "encoder-model.onnx"
+            decoder_name = "decoder_joint-model.onnx"
+        else:
             encoder_name = "encoder-model.int8.onnx"
             decoder_name = "decoder_joint-model.int8.onnx"
 
@@ -166,8 +223,7 @@ class ParakeetTranscriber:
         Only trims the edges — internal pauses are kept intact so
         the model sees natural speech flow.
         """
-        tensor = torch.from_numpy(audio)
-        stamps = get_speech_timestamps(tensor, self._vad, sampling_rate=SAMPLE_RATE)
+        stamps = get_speech_timestamps(audio, self._vad, sampling_rate=SAMPLE_RATE)
         if not stamps:
             return audio  # no speech detected, keep all
         # Trim to [first_speech_start - pad, last_speech_end + pad]
@@ -176,6 +232,69 @@ class ParakeetTranscriber:
         start = max(0, stamps[0]["start"] - start_pad)
         end = min(len(audio), stamps[-1]["end"] + end_pad)
         return audio[start:end]
+
+    # Max chunk duration for encoder safety (30s audio = ~3000 mel frames)
+    MAX_CHUNK_SECS = 30.0
+
+    def transcribe_chunked(self, audio: np.ndarray) -> str:
+        """Transcribe long audio by VAD-splitting into chunks.
+
+        Uses Silero VAD to find speech segments, groups them into
+        chunks of at most MAX_CHUNK_SECS, and transcribes each chunk.
+        """
+        if len(audio) < 1600:
+            return ""
+
+        max_chunk_samples = int(self.MAX_CHUNK_SECS * SAMPLE_RATE)
+
+        # Short audio: transcribe directly
+        if len(audio) <= max_chunk_samples:
+            return self.transcribe(audio)
+
+        t_total = time.perf_counter()
+        total_dur = len(audio) / SAMPLE_RATE
+
+        with PerfTimer("transcribe_chunked.vad"):
+            stamps = get_speech_timestamps(audio, self._vad, sampling_rate=SAMPLE_RATE)
+
+        if not stamps:
+            return ""
+
+        # Group speech segments into chunks that fit within max duration
+        pad_before = 4800   # 300ms context before
+        pad_after = 1600    # 100ms context after
+        chunks = []
+        cur_start = stamps[0]["start"]
+        cur_end = stamps[0]["end"]
+
+        for seg in stamps[1:]:
+            if seg["end"] - cur_start > max_chunk_samples:
+                chunks.append((cur_start, cur_end))
+                cur_start = seg["start"]
+            cur_end = seg["end"]
+        chunks.append((cur_start, cur_end))
+
+        # Transcribe each chunk
+        texts = []
+        for i, (start, end) in enumerate(chunks):
+            s = max(0, start - pad_before)
+            e = min(len(audio), end + pad_after)
+            chunk_audio = audio[s:e]
+            chunk_dur = len(chunk_audio) / SAMPLE_RATE
+
+            t0 = time.perf_counter()
+            text = self.transcribe(chunk_audio)
+            dur = time.perf_counter() - t0
+            log.info("Chunk %d/%d: %.1fs audio -> %.2fs inference: %s",
+                     i + 1, len(chunks), chunk_dur, dur, text[:60])
+            if text.strip():
+                texts.append(text)
+
+        total_ms = (time.perf_counter() - t_total) * 1000
+        log.info("PERF transcribe_chunked.total: %.0fms (audio=%.1fs, %d chunks)",
+                 total_ms, total_dur, len(chunks))
+
+        return " ".join(texts)
 
     def transcribe(self, audio: np.ndarray, debug_prefix: str = "") -> str:
         """Transcribe 16kHz float32 mono audio to text.

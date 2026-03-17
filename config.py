@@ -1,5 +1,7 @@
 """Application settings management."""
 
+__version__ = "0.2.0"
+
 import json
 import os
 import sys

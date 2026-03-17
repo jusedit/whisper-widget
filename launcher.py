@@ -31,8 +31,8 @@ PYTHON_DIR = APP_DIR / "python"
 # Files to bundle / extract (app source)
 APP_FILES = [
     "main.py", "presplash.pyw", "overlay.py", "config.py", "recorder.py",
-    "transcriber.py", "settings_dialog.py", "model_downloader.py", "assets.py",
-    "perf_logger.py", "requirements.txt", "favicon.ico",
+    "transcriber.py", "vad.py", "settings_dialog.py", "model_downloader.py",
+    "assets.py", "perf_logger.py", "requirements.txt", "favicon.ico",
 ]
 
 # Bundled Python setup files
@@ -329,7 +329,7 @@ def _install_deps(on_status=None):
 def _verify_imports():
     """Quick smoke test: try importing critical modules with python.exe to catch errors."""
     python = str(PYTHON_DIR / "python.exe")
-    test_code = "import torch; import PyQt6.QtWidgets; print('OK')"
+    test_code = "import onnxruntime; import PyQt6.QtWidgets; print('OK')"
     log.info("Verifying imports...")
     result = subprocess.run(
         [python, "-c", test_code],
@@ -502,10 +502,24 @@ def _write_exe_path():
         log.info("Wrote launcher path: %s", sys.executable)
 
 
+def _read_bundled_version() -> str:
+    """Read __version__ from bundled config.py."""
+    config_py = _get_bundle_dir() / "config.py"
+    if config_py.exists():
+        for line in config_py.read_text(encoding="utf-8").splitlines()[:10]:
+            if line.startswith("__version__"):
+                try:
+                    return line.split('"')[1]
+                except IndexError:
+                    pass
+    return "unknown"
+
+
 def main():
     t_start = time.time()
+    version = _read_bundled_version()
     log.info("=" * 50)
-    log.info("Launcher starting (frozen=%s)", getattr(sys, "frozen", False))
+    log.info("Launcher v%s starting (frozen=%s)", version, getattr(sys, "frozen", False))
     log.info("sys.executable = %s", sys.executable)
     log.info("APP_DIR = %s", APP_DIR)
 
@@ -515,10 +529,10 @@ def main():
     if is_frozen:
         is_update = _files_changed()
         if is_update:
-            log.info("Update detected — new app files bundled")
+            log.info("Update detected — installing v%s", version)
             _kill_existing()
         elif _is_app_running():
-            log.info("App already running with same version, exiting")
+            log.info("App already running (v%s), exiting", version)
             return
 
     # Extract latest source files (updates app code)
